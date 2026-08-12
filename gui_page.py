@@ -402,8 +402,8 @@ async function updateSample(i){ const j=await api("/api/samples/update",{index:i
 async function toggleActive(i){ const j=await api("/api/samples/update",{index:i,active:el("a_"+i).checked}); SAMPLES=j.samples; refresh(); }
 async function removeSample(i){ applySamples(await api("/api/samples/remove",{index:i})); }
 async function move(i,d){ applySamples(await api("/api/samples/move",{index:i,delta:d})); }
-async function clearAll(){ while(SAMPLES.length){SAMPLES=(await api("/api/samples/remove",{index:0})).samples;} applySamples({samples:SAMPLES,channels:CHANNELS}); }
-function applySamples(j){ SAMPLES=j.samples; if(j.channels){CHANNELS=j.channels; initAxisLabels();} renderSamples(); refresh(); }
+async function clearAll(){ let j={samples:SAMPLES,channels:CHANNELS}; while(j.samples.length){j=await api("/api/samples/remove",{index:0});} applySamples(j); }
+function applySamples(j){ SAMPLES=j.samples; if(j.channels){CHANNELS=j.channels; initAxisLabels();} if(j.scatter_gates)SCATTER_GATES=j.scatter_gates; if(j.hist_gates)HIST_GATES=j.hist_gates; if(j.analysis_gates)ANALYSIS_GATES=j.analysis_gates; renderSamples(); refresh(); }
 
 /* browse */
 async function browse(dir){

@@ -66,7 +66,9 @@ SCHEMA = [
          "Bins are spaced evenly on the log axis. More bins resolve finer structure but add noise."),
         ("smooth_sigma", "Smoothing", "float",
          "Width of the Gaussian smoothing kernel in bins. 0 disables smoothing. "
-         "Increase for smoother lines; too much smoothing hides real shoulders."),
+         "Smoothing spreads events over neighbouring bins, so sharp peaks get lower "
+         "while the total event count is preserved; use '% of max' for a fixed peak height. "
+         "Too much smoothing hides real shoulders."),
         ("xlim_lo", "X min", "float", "Left end of the x axis (a power of ten looks tidiest)."),
         ("xlim_hi", "X max", "float", "Right end of the x axis."),
         ("ylim_auto", "Auto Y range", "bool",
@@ -370,41 +372,45 @@ def apply_style(s):
 # --------------------------------------------------------------- renderer --
 def histogram_curve(values, s):
     """Binned (and optionally smoothed) curve: (bin centres, heights)."""
+    n_bins = max(int(s["n_bins"]), 2)
+    sigma = max(float(s["smooth_sigma"]), 0.0)
+    density = s["y_axis"] == "density"
     if s["x_scale"] == "linear":
-        bins = np.linspace(s["xlim_lo"], s["xlim_hi"], s["n_bins"] + 1)
+        bins = np.linspace(s["xlim_lo"], s["xlim_hi"], n_bins + 1)
+        centers = 0.5 * (bins[:-1] + bins[1:])
         if values.size == 0:
-            centers = 0.5 * (bins[:-1] + bins[1:])
             return centers, np.zeros(len(centers))
-        density = s["y_axis"] == "density"
-        counts, edges = np.histogram(values, bins=bins, density=density)
+        counts, _ = np.histogram(values, bins=bins, density=density)
     else:
-        log_bins = np.linspace(np.log10(s["xlim_lo"]), np.log10(s["xlim_hi"]), s["n_bins"] + 1)
+        log_bins = np.linspace(np.log10(s["xlim_lo"]), np.log10(s["xlim_hi"]), n_bins + 1)
+        centers = 10 ** (0.5 * (log_bins[:-1] + log_bins[1:]))
         if values.size == 0:
-            centers = 10 ** (0.5 * (log_bins[:-1] + log_bins[1:]))
             return centers, np.zeros(len(centers))
-        density = s["y_axis"] == "density"
-        counts, edges = np.histogram(np.log10(values), bins=log_bins, density=density)
+        counts, _ = np.histogram(np.log10(values), bins=log_bins, density=density)
     counts = counts.astype(float)
+    if sigma > 0:
+        counts = gaussian_filter1d(counts, sigma=sigma, mode="constant", cval=0.0)
     if s["y_axis"] == "percent_of_max" and counts.max() > 0:
         counts = 100 * counts / counts.max()
-    if s["smooth_sigma"] > 0:
-        counts = gaussian_filter1d(counts, sigma=s["smooth_sigma"], mode="nearest")
-    if s["x_scale"] == "linear":
-        return 0.5 * (edges[:-1] + edges[1:]), counts
-    return 10 ** (0.5 * (edges[:-1] + edges[1:])), counts
+    return centers, counts
 
 
 def draw_histogram(ax, series, s):
     """Draw overlaid histograms. series = [{label, color, values, hist_gate?}, ...]."""
     y_max = 0.0
+    smoothed = s["smooth_sigma"] > 0
     for item in series:
         centers, counts = histogram_curve(item["values"], s)
         y_max = max(y_max, float(counts.max()))
         if s["fill_alpha"] > 0:
-            ax.fill_between(centers, counts, step="mid", color=item["color"],
-                            alpha=s["fill_alpha"], lw=0)
-        ax.step(centers, counts, where="mid", color=item["color"],
-                lw=s["line_width"], label=item["label"])
+            ax.fill_between(centers, counts, step=None if smoothed else "mid",
+                            color=item["color"], alpha=s["fill_alpha"], lw=0)
+        if smoothed:
+            ax.plot(centers, counts, color=item["color"],
+                    lw=s["line_width"], label=item["label"])
+        else:
+            ax.step(centers, counts, where="mid", color=item["color"],
+                    lw=s["line_width"], label=item["label"])
 
     if s["x_scale"] == "linear":
         ax.set_xscale("linear")

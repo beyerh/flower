@@ -13,7 +13,6 @@ Stop:  Ctrl+C in the terminal
 import base64
 import io
 import json
-import socket
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -120,7 +119,7 @@ def gate_stats(s):
 # --------------------------------------------------------------- rendering --
 def _png(fig):
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=110)
+    fig.savefig(buf, format="png", dpi=fig.dpi)
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
 
@@ -299,7 +298,10 @@ class Handler(BaseHTTPRequestHandler):
                         STATE[gate_dict][str(ki)] = v
                     elif ki > idx:
                         STATE[gate_dict][str(ki - 1)] = v
-            return {"samples": self.sample_list(), "channels": channels()}
+            return {"samples": self.sample_list(), "channels": channels(),
+                    "scatter_gates": STATE["scatter_gates"],
+                    "hist_gates": STATE["hist_gates"],
+                    "analysis_gates": STATE["analysis_gates"]}
 
         if path == "/api/samples/update":
             sample = STATE["samples"][req["index"]]
@@ -320,7 +322,10 @@ class Handler(BaseHTTPRequestHandler):
                     else: STATE[gate_dict].pop(str(j), None)
                     if gj: STATE[gate_dict][str(i)] = gj
                     else: STATE[gate_dict].pop(str(i), None)
-            return {"samples": self.sample_list()}
+            return {"samples": self.sample_list(),
+                    "scatter_gates": STATE["scatter_gates"],
+                    "hist_gates": STATE["hist_gates"],
+                    "analysis_gates": STATE["analysis_gates"]}
 
         if path == "/api/gate/set":
             gate_type = req.get("gate_type", "scatter")
@@ -427,11 +432,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     autoload_defaults()
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
     url = f"http://127.0.0.1:{port}"
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Flower ready at {url}")
     print(f"Loaded {len(STATE['samples'])} file(s) from {fc.DATA_DIR}")
     print("Press Ctrl+C to stop.")
