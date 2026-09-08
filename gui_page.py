@@ -32,8 +32,8 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .card.collapsed > h2 .chev { transform:rotate(-90deg); }
   .card.collapsed > .body { display:none; }
   .body { padding:12px 14px; }
-  .plots { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
-  @media (max-width:1400px) { .plots { grid-template-columns:1fr 1fr; } }
+  .plots { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:16px; }
+  @media (max-width:1600px) { .plots { grid-template-columns:1fr 1fr; } }
   @media (max-width:900px) { .plots { grid-template-columns:1fr; } }
   label.field { display:block; margin-bottom:10px; }
   label.field .name { font-weight:500; }
@@ -183,6 +183,33 @@ PAGE_HTML = r"""<!DOCTYPE html>
         </div>
 
         <div class="gate-section">
+          <h3>Singlets scatter (FSC-A/FSC-H)</h3>
+          <div class="gate-mode">
+            <button id="sgm_polygon" class="active" onclick="setSingletsMode('polygon')">Polygon</button>
+            <button id="sgm_quadrant" onclick="setSingletsMode('quadrant')">Quadrant</button>
+            <button onclick="clearSingletsGate()">Clear</button>
+          </div>
+          <div id="squadrantUI" style="display:none;">
+            <div class="grid2">
+              <label class="field"><span class="name">X threshold</span>
+                <input type="number" id="sqthr_x" step="any" onchange="updateSingletsQuadrant()"></label>
+              <label class="field"><span class="name">Y threshold</span>
+                <input type="number" id="sqthr_y" step="any" onchange="updateSingletsQuadrant()"></label>
+            </div>
+            <div class="quad-grid">
+              <button id="sq_UL" onclick="toggleSingletsQuadrant('UL')">UL</button>
+              <button id="sq_UR" onclick="toggleSingletsQuadrant('UR')">UR</button>
+              <button id="sq_LL" onclick="toggleSingletsQuadrant('LL')">LL</button>
+              <button id="sq_LR" onclick="toggleSingletsQuadrant('LR')">LR</button>
+            </div>
+          </div>
+          <div id="spolygonUI" class="btnrow">
+            <button onclick="closeSingletsGate()">Close gate</button>
+            <button onclick="undoSingletsVertex()">Undo point</button>
+          </div>
+        </div>
+
+        <div class="gate-section">
           <h3>Histogram interval</h3>
           <div class="gate-mode">
             <button onclick="clearHistGate()">Clear interval</button>
@@ -249,6 +276,26 @@ PAGE_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="card">
+        <h2><span class="chev" style="visibility:hidden">&#9660;</span> Singlets scatter <span class="tag" id="singlets_size"></span></h2>
+        <div class="body">
+          <div class="plotwrap">
+            <div class="y-col">
+              <div class="ylbl" id="singlets_y_label" onclick="toggleAxisDD('singlets_y')"><span id="singlets_y_val"></span></div>
+              <div class="dd" id="singlets_y_dd"></div>
+            </div>
+            <div class="main-col">
+              <div class="plotbox" id="singletsbox">
+                <img id="singletsimg" alt="singlets scatter">
+                <canvas id="singletscv"></canvas>
+              </div>
+              <div class="axis-x">
+                <div class="al" id="singlets_x_label" onclick="toggleAxisDD('singlets_x')"><span id="singlets_x_val"></span><div class="dd" id="singlets_x_dd"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
         <h2><span class="chev" style="visibility:hidden">&#9660;</span> Histogram <span class="tag" id="hist_size"></span></h2>
         <div class="body">
           <div class="plotwrap">
@@ -299,13 +346,17 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
 <script>
 let SCHEMA=[], DEFAULTS={}, SAMPLES=[], CHANNELS=[];
-let SCATTER_META=null, HIST_META=null, ANALYSIS_META=null;
-let SCATTER_GATES={}, HIST_GATES={}, ANALYSIS_GATES={};
+let SCATTER_META=null, SINGLETS_META=null, HIST_META=null, ANALYSIS_META=null;
+let SCATTER_GATES={}, SINGLETS_GATES={}, HIST_GATES={}, ANALYSIS_GATES={};
 let activeIdx=0, busy=0;
 
 // Gating scatter state
 let verts=[], closed=false, scatterMode="polygon";
 let quadThr={x:0,y:0}, quadSel=new Set();
+
+// Singlets scatter state
+let sVerts=[], sClosed=false, singletsMode="polygon";
+let sQuadThr={x:0,y:0}, sQuadSel=new Set();
 
 // Analysis scatter state
 let aVerts=[], aClosed=false, analysisMode="polygon";
@@ -329,7 +380,7 @@ async function api(path,body){
 }
 
 /* settings — channel fields are handled by axis-label dropdowns, not here */
-const CHANNEL_KEYS = new Set(["channel","scatter_x","scatter_y","analysis_x","analysis_y"]);
+const CHANNEL_KEYS = new Set(["channel","scatter_x","scatter_y","singlets_x","singlets_y","analysis_x","analysis_y"]);
 function fieldHtml(f){
   if(f.type==="bool") return `<div class="switch"><input type="checkbox" id="f_${f.key}" ${DEFAULTS[f.key]?"checked":""} onchange="refresh()"><span class="txt"><span class="name">${f.label}</span><span class="hint">${f.help}</span></span></div>`;
   if(f.type==="choice"||f.type==="channel"){
@@ -359,17 +410,18 @@ function settings(){
 /* samples */
 function renderSamples(){
   el("sampletable").innerHTML=SAMPLES.map((s,i)=>{
-    const sg=SCATTER_GATES[String(i)], hg=HIST_GATES[String(i)], ag=ANALYSIS_GATES[String(i)];
+    const sg=SCATTER_GATES[String(i)], sig=SINGLETS_GATES[String(i)], hg=HIST_GATES[String(i)], ag=ANALYSIS_GATES[String(i)];
     let icons="";
     if(sg) icons+='<span style="color:var(--ok);font-size:10px;" title="scatter gate">S</span>';
+    if(sig) icons+='<span style="color:var(--ok);font-size:10px;" title="singlets gate">G</span>';
     if(hg) icons+='<span style="color:var(--ok);font-size:10px;" title="histogram gate">H</span>';
     if(ag) icons+='<span style="color:var(--ok);font-size:10px;" title="analysis gate">A</span>';
-    if(!sg&&!hg&&!ag) icons='<span style="color:var(--line);font-size:14px;">&#9675;</span>';
+    if(!sg&&!sig&&!hg&&!ag) icons='<span style="color:var(--line);font-size:14px;">&#9675;</span>';
     return `<tr><td><input type="checkbox" ${s.active!==false?"checked":""} id="a_${i}" onchange="toggleActive(${i})" style="width:15px;height:15px;accent-color:var(--accent);"></td><td style="font-size:10px;">${icons}</td><td><input type="color" value="${s.color}" oninput="updateSample(${i})" id="c_${i}"></td><td style="width:100%"><input type="text" value="${s.label}" onchange="updateSample(${i})" id="l_${i}"></td><td class="count">${s.n.toLocaleString()}</td><td><button class="mini" onclick="move(${i},-1)">&#9650;</button></td><td><button class="mini" onclick="move(${i},1)">&#9660;</button></td><td><button class="mini" onclick="removeSample(${i})">&times;</button></td></tr>`;
   }).join("")||'<tr><td class="count">No samples loaded.</td></tr>';
 
   const sel=el("ssample"); const keep=sel.selectedIndex;
-  sel.innerHTML=SAMPLES.map((s,i)=>{let m="";if(SCATTER_GATES[String(i)]||HIST_GATES[String(i)]||ANALYSIS_GATES[String(i)])m=" \u2713";return `<option value="${i}">${s.label}${m}</option>`;}).join("");
+  sel.innerHTML=SAMPLES.map((s,i)=>{let m="";if(SCATTER_GATES[String(i)]||SINGLETS_GATES[String(i)]||HIST_GATES[String(i)]||ANALYSIS_GATES[String(i)])m=" \u2713";return `<option value="${i}">${s.label}${m}</option>`;}).join("");
   activeIdx=Math.max(0,Math.min(keep,SAMPLES.length-1)); sel.selectedIndex=activeIdx;
   loadGatesForActive();
   el("hdrinfo").textContent=SAMPLES.length?`${SAMPLES.length} sample(s)`:"no samples";
@@ -403,7 +455,7 @@ async function toggleActive(i){ const j=await api("/api/samples/update",{index:i
 async function removeSample(i){ applySamples(await api("/api/samples/remove",{index:i})); }
 async function move(i,d){ applySamples(await api("/api/samples/move",{index:i,delta:d})); }
 async function clearAll(){ let j={samples:SAMPLES,channels:CHANNELS}; while(j.samples.length){j=await api("/api/samples/remove",{index:0});} applySamples(j); }
-function applySamples(j){ SAMPLES=j.samples; if(j.channels){CHANNELS=j.channels; initAxisLabels();} if(j.scatter_gates)SCATTER_GATES=j.scatter_gates; if(j.hist_gates)HIST_GATES=j.hist_gates; if(j.analysis_gates)ANALYSIS_GATES=j.analysis_gates; renderSamples(); refresh(); }
+function applySamples(j){ SAMPLES=j.samples; if(j.channels){CHANNELS=j.channels; initAxisLabels();} if(j.scatter_gates)SCATTER_GATES=j.scatter_gates; if(j.singlets_gates)SINGLETS_GATES=j.singlets_gates; if(j.hist_gates)HIST_GATES=j.hist_gates; if(j.analysis_gates)ANALYSIS_GATES=j.analysis_gates; renderSamples(); refresh(); }
 
 /* browse */
 async function browse(dir){
@@ -437,6 +489,12 @@ async function drawScatter(){
   el("scatterimg").onload=()=>sizeCanvas("scatter"); el("scatter_size").textContent=`${SCATTER_META.width}\u00d7${SCATTER_META.height}px`;
   showGateStats(j.stats);
 }
+async function drawSinglets(){
+  if(!SAMPLES.length){el("singletsimg").removeAttribute("src");return;}
+  const j=await api("/api/singlets_scatter",{index:activeIdx,settings:settings()});
+  SINGLETS_META=j.meta; el("singletsimg").src="data:image/png;base64,"+j.img;
+  el("singletsimg").onload=()=>sizeCanvas("singlets"); el("singlets_size").textContent=`${SINGLETS_META.width}\u00d7${SINGLETS_META.height}px`;
+}
 async function drawAnalysis(){
   if(!SAMPLES.length){el("analysisimg").removeAttribute("src");return;}
   const j=await api("/api/analysis_scatter",{index:activeIdx,settings:settings()});
@@ -453,40 +511,46 @@ async function drawHistogram(){
 function showGateStats(stats){
   el("gatestats").innerHTML=stats.map(s=>
     `<b>${s.label}</b>`+
-    (s.has_scatter_gate?' S\u2713':'')+(s.has_hist_gate?' H\u2713':'')+(s.has_analysis_gate?' A\u2713':'')+
+    (s.has_scatter_gate?' S\u2713':'')+(s.has_singlets_gate?' G\u2713':'')+(s.has_hist_gate?' H\u2713':'')+(s.has_analysis_gate?' A\u2713':'')+
     `: ${s.scatter_kept.toLocaleString()}/${s.total.toLocaleString()} (${s.scatter_percent}%)`+
+    (s.has_singlets_gate?` \u2192 ${s.singlets_kept.toLocaleString()} singlets (${s.singlets_percent}%)`:'')+
     (s.has_hist_gate?` \u2192 ${s.plotted.toLocaleString()} plotted`:'')
   ).join("<br>");
 }
-function refresh(){ drawScatter(); drawHistogram(); drawAnalysis(); }
+function refresh(){ drawScatter(); drawSinglets(); drawHistogram(); drawAnalysis(); }
 function switchSample(){
   activeIdx=Math.max(0,el("ssample").selectedIndex);
-  loadGatesForActive(); drawScatter(); drawAnalysis();
+  loadGatesForActive(); drawScatter(); drawSinglets(); drawAnalysis();
 }
 function loadGatesForActive(){
-  const sg=SCATTER_GATES[String(activeIdx)], hg=HIST_GATES[String(activeIdx)], ag=ANALYSIS_GATES[String(activeIdx)];
+  const sg=SCATTER_GATES[String(activeIdx)], sig=SINGLETS_GATES[String(activeIdx)], hg=HIST_GATES[String(activeIdx)], ag=ANALYSIS_GATES[String(activeIdx)];
   // gating scatter
   if(sg&&sg.type==="polygon"){verts=sg.verts.map(v=>[...v]);closed=true;setScatterMode("polygon");}
   else if(sg&&sg.type==="quadrant"){verts=[];closed=false;quadThr={x:sg.x_threshold,y:sg.y_threshold};quadSel=new Set(sg.quadrants||[]);setScatterMode("quadrant");}
   else{verts=[];closed=false;setScatterMode("polygon");}
+  // singlets
+  if(sig&&sig.type==="polygon"){sVerts=sig.verts.map(v=>[...v]);sClosed=true;setSingletsMode("polygon");}
+  else if(sig&&sig.type==="quadrant"){sVerts=[];sClosed=false;sQuadThr={x:sig.x_threshold,y:sig.y_threshold};sQuadSel=new Set(sig.quadrants||[]);setSingletsMode("quadrant");}
+  else{sVerts=[];sClosed=false;setSingletsMode("polygon");}
   // hist
   if(hg&&hg.type==="interval"){histInterval={lo:hg.lo,hi:hg.hi,y:hg.y_pos||0};}else{histInterval=null;}
   // analysis
   if(ag&&ag.type==="polygon"){aVerts=ag.verts.map(v=>[...v]);aClosed=true;setAnalysisMode("polygon");}
   else if(ag&&ag.type==="quadrant"){aVerts=[];aClosed=false;aQuadThr={x:ag.x_threshold,y:ag.y_threshold};aQuadSel=new Set(ag.quadrants||[]);setAnalysisMode("quadrant");}
   else{aVerts=[];aClosed=false;setAnalysisMode("polygon");}
-  overlayScatter(); overlayHist(); overlayAnalysis();
+  overlayScatter(); overlaySinglets(); overlayHist(); overlayAnalysis();
 }
 
 /* canvas helpers */
 function sizeCanvas(which){
   if(which==="scatter"){const img=el("scatterimg"),cv=el("scattercv");cv.width=img.clientWidth;cv.height=img.clientHeight;overlayScatter();}
+  if(which==="singlets"){const img=el("singletsimg"),cv=el("singletscv");cv.width=img.clientWidth;cv.height=img.clientHeight;overlaySinglets();}
   if(which==="hist"){const img=el("histimg"),cv=el("histcv");cv.width=img.clientWidth;cv.height=img.clientHeight;overlayHist();}
   if(which==="analysis"){const img=el("analysisimg"),cv=el("analysiscv");cv.width=img.clientWidth;cv.height=img.clientHeight;overlayAnalysis();}
 }
 const BBOX=[0.15,0.14,0.80,0.80];
 function toPx(meta,x,y){
-  const img=meta===SCATTER_META?el("scatterimg"):meta===ANALYSIS_META?el("analysisimg"):el("histimg");
+  const img=meta===SCATTER_META?el("scatterimg"):meta===SINGLETS_META?el("singletsimg"):meta===ANALYSIS_META?el("analysisimg"):el("histimg");
   const w=img.clientWidth,h=img.clientHeight,sc=meta.scale||"log";
   let fx,fy;
   if(sc==="log"){
@@ -499,7 +563,7 @@ function toPx(meta,x,y){
   return [(BBOX[0]+fx*BBOX[2])*w,(1-BBOX[1]-fy*BBOX[3])*h];
 }
 function toData(meta,px,py){
-  const img=meta===SCATTER_META?el("scatterimg"):meta===ANALYSIS_META?el("analysisimg"):el("histimg");
+  const img=meta===SCATTER_META?el("scatterimg"):meta===SINGLETS_META?el("singletsimg"):meta===ANALYSIS_META?el("analysisimg"):el("histimg");
   const w=img.clientWidth,h=img.clientHeight,sc=meta.scale||"log";
   const fx=(px/w-BBOX[0])/BBOX[2], fy=(1-py/h-BBOX[1])/BBOX[3];
   if(sc==="log"){
@@ -576,6 +640,75 @@ async function sendQuadrantGate(){
   const gate={type:"quadrant",x:settings().scatter_x,y:settings().scatter_y,x_threshold:quadThr.x,y_threshold:quadThr.y,quadrants:[...quadSel]};
   await api("/api/gate/set",{index:activeIdx,gate_type:"scatter",gate:gate});
   SCATTER_GATES[String(activeIdx)]=gate;renderSamples();refresh();
+}
+
+/* singlets scatter */
+function setSingletsMode(mode){
+  singletsMode=mode;
+  el("sgm_polygon").classList.toggle("active",mode==="polygon");
+  el("sgm_quadrant").classList.toggle("active",mode==="quadrant");
+  el("spolygonUI").style.display=mode==="polygon"?"flex":"none";
+  el("squadrantUI").style.display=mode==="quadrant"?"block":"none";
+  if(mode==="quadrant"&&SINGLETS_META){
+    if(sQuadThr.x===0){const xl=SINGLETS_META.xlim,yl=SINGLETS_META.ylim;sQuadThr.x=Math.sqrt(xl[0]*xl[1]);sQuadThr.y=Math.sqrt(yl[0]*yl[1]);el("sqthr_x").value=sQuadThr.x.toExponential(2);el("sqthr_y").value=sQuadThr.y.toExponential(2);}
+    updateSingletsQuadrantUI();
+  }
+  overlaySinglets();
+}
+function overlaySinglets(){
+  const cv=el("singletscv"),ctx=cv.getContext("2d");ctx.clearRect(0,0,cv.width,cv.height);
+  if(!SINGLETS_META)return;
+  if(singletsMode==="polygon"&&sVerts.length){
+    ctx.strokeStyle="#C44E52";ctx.lineWidth=1.5;ctx.beginPath();
+    sVerts.forEach((v,i)=>{const[x,y]=toPx(SINGLETS_META,v[0],v[1]);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
+    if(sClosed)ctx.closePath();ctx.stroke();
+    ctx.fillStyle="#C44E52";sVerts.forEach(v=>{const[x,y]=toPx(SINGLETS_META,v[0],v[1]);ctx.beginPath();ctx.arc(x,y,3,0,6.2832);ctx.fill();});
+  }
+  if(singletsMode==="quadrant"&&sQuadThr.x>0){
+    const[qx,qy]=toPx(SINGLETS_META,sQuadThr.x,sQuadThr.y);
+    const img=el("singletsimg"),w=img.clientWidth,h=img.clientHeight;
+    ctx.strokeStyle="#C44E52";ctx.lineWidth=1.5;ctx.setLineDash([5,3]);
+    ctx.beginPath();ctx.moveTo(qx,(1-BBOX[1]-BBOX[3])*h);ctx.lineTo(qx,(1-BBOX[1])*h);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(BBOX[0]*w,qy);ctx.lineTo((BBOX[0]+BBOX[2])*w,qy);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font="11px sans-serif";ctx.fillStyle="#C44E52";
+    const labels={UL:[qx-15,qy-8],UR:[qx+8,qy-8],LL:[qx-15,qy+16],LR:[qx+8,qy+16]};
+    for(const q of sQuadSel){const[lx,ly]=labels[q];ctx.fillText(q,lx,ly);}
+  }
+}
+el("singletscv").addEventListener("click",e=>{
+  if(!SINGLETS_META)return;
+  if(singletsMode==="polygon"){
+    if(sClosed){sVerts=[];sClosed=false;}
+    const r=e.target.getBoundingClientRect();sVerts.push(toData(SINGLETS_META,e.clientX-r.left,e.clientY-r.top));overlaySinglets();
+  }
+});
+el("singletscv").addEventListener("dblclick",()=>{if(singletsMode==="polygon")closeSingletsGate();});
+async function closeSingletsGate(){
+  if(sVerts.length<3){banner("Need at least 3 corners.","err");return;}
+  sClosed=true;overlaySinglets();
+  const gate={type:"polygon",x:settings().singlets_x,y:settings().singlets_y,verts:sVerts};
+  await api("/api/gate/set",{index:activeIdx,gate_type:"singlets",gate:gate});
+  SINGLETS_GATES[String(activeIdx)]=gate;renderSamples();refresh();
+}
+function undoSingletsVertex(){sVerts.pop();sClosed=false;overlaySinglets();}
+async function clearSingletsGate(){
+  sVerts=[];sClosed=false;sQuadSel.clear();overlaySinglets();
+  delete SINGLETS_GATES[String(activeIdx)];
+  await api("/api/gate/clear",{index:activeIdx,gate_type:"singlets"});
+  renderSamples();refresh();
+}
+function toggleSingletsQuadrant(q){if(sQuadSel.has(q))sQuadSel.delete(q);else sQuadSel.add(q);updateSingletsQuadrantUI();sendSingletsQuadrantGate();}
+function updateSingletsQuadrantUI(){for(const q of["UL","UR","LL","LR"])el("sq_"+q).classList.toggle("active",sQuadSel.has(q));}
+async function updateSingletsQuadrant(){
+  sQuadThr.x=parseFloat(el("sqthr_x").value)||0;sQuadThr.y=parseFloat(el("sqthr_y").value)||0;
+  overlaySinglets();sendSingletsQuadrantGate();
+}
+async function sendSingletsQuadrantGate(){
+  if(sQuadSel.size===0)return;
+  const gate={type:"quadrant",x:settings().singlets_x,y:settings().singlets_y,x_threshold:sQuadThr.x,y_threshold:sQuadThr.y,quadrants:[...sQuadSel]};
+  await api("/api/gate/set",{index:activeIdx,gate_type:"singlets",gate:gate});
+  SINGLETS_GATES[String(activeIdx)]=gate;renderSamples();refresh();
 }
 
 /* analysis scatter */
@@ -717,13 +850,14 @@ async function clearHistGate(){
   renderSamples();refresh();
 }
 
-window.addEventListener("resize",()=>{if(SCATTER_META)sizeCanvas("scatter");if(HIST_META)sizeCanvas("hist");if(ANALYSIS_META)sizeCanvas("analysis");});
+window.addEventListener("resize",()=>{if(SCATTER_META)sizeCanvas("scatter");if(SINGLETS_META)sizeCanvas("singlets");if(HIST_META)sizeCanvas("hist");if(ANALYSIS_META)sizeCanvas("analysis");});
 
 /* save */
 async function save(){
   const j=await api("/api/save",{settings:settings(),scatter_index:activeIdx});
   let msg="Saved: "+j.pdf+"  |  "+j.png;
   if(j.scatter_pdf)msg+="  |  "+j.scatter_pdf;
+  if(j.singlets_pdf)msg+="  |  "+j.singlets_pdf;
   if(j.analysis_pdf)msg+="  |  "+j.analysis_pdf;
   if(j.xlsx)msg+="  |  "+j.xlsx;
   banner(msg,"ok"); el("snippet").textContent=j.snippet;
@@ -734,7 +868,7 @@ async function save(){
 (async function init(){
   const j=await api("/api/init");
   SCHEMA=j.schema;DEFAULTS=j.defaults;SAMPLES=j.samples;CHANNELS=j.channels;
-  SCATTER_GATES=j.scatter_gates||{};HIST_GATES=j.hist_gates||{};ANALYSIS_GATES=j.analysis_gates||{};
+  SCATTER_GATES=j.scatter_gates||{};SINGLETS_GATES=j.singlets_gates||{};HIST_GATES=j.hist_gates||{};ANALYSIS_GATES=j.analysis_gates||{};
   buildSettings();renderSamples();initAxisLabels();refresh();
 })();
 </script>

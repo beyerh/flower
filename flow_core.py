@@ -8,6 +8,7 @@ so figures look identical no matter how they were produced.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -18,8 +19,15 @@ from matplotlib.path import Path as MplPath
 from matplotlib.ticker import AutoMinorLocator, FuncFormatter, LogLocator, NullFormatter
 from scipy.ndimage import gaussian_filter1d
 
-DATA_DIR = Path(__file__).parent
-RESULTS_DIR = DATA_DIR / "results"
+if getattr(sys, "frozen", False):
+    # Running as a PyInstaller bundle — use the user's home directory
+    # as the starting point for the file browser, and a writable folder
+    # for results (the app bundle directory is read-only on macOS).
+    DATA_DIR = Path.home()
+    RESULTS_DIR = Path.home() / "Flower_results"
+else:
+    DATA_DIR = Path(__file__).parent
+    RESULTS_DIR = DATA_DIR / "results"
 
 _Y_AXIS_MODES = {
     "density": "Density",
@@ -105,6 +113,25 @@ SCHEMA = [
         ("scatter_point_size", "Point size", "float", "Size of scatter dots in points (shared by both scatters)."),
         ("scatter_point_alpha", "Point opacity", "float", "Transparency of scatter dots 0-1 (shared by both scatters)."),
     ]),
+    ("Singlets scatter", [
+        ("singlets_x", "X channel", "channel",
+         "Parameter on the singlets scatter x axis (typically FSC-A)."),
+        ("singlets_y", "Y channel", "channel",
+         "Parameter on the singlets scatter y axis (typically FSC-H for singlet discrimination)."),
+        ("singlets_scale", "Axis scale", "choice",
+         "Logarithmic or linear axes for the singlets scatter.",
+         ["log", "linear"]),
+        ("singlets_xlim_auto", "Auto X range", "bool",
+         "Use percentile-based limits that ignore extreme outliers."),
+        ("singlets_xlim_lo", "X min", "float", "Left end of the singlets scatter x axis (used when auto is off)."),
+        ("singlets_xlim_hi", "X max", "float", "Right end of the singlets scatter x axis."),
+        ("singlets_ylim_auto", "Auto Y range", "bool",
+         "Use percentile-based limits that ignore extreme outliers."),
+        ("singlets_ylim_lo", "Y min", "float", "Bottom end of the singlets scatter y axis (used when auto is off)."),
+        ("singlets_ylim_hi", "Y max", "float", "Top end of the singlets scatter y axis."),
+        ("singlets_xlabel", "X label", "text", "Leave empty to derive from the x channel."),
+        ("singlets_ylabel", "Y label", "text", "Leave empty to derive from the y channel."),
+    ]),
     ("Analysis scatter", [
         ("analysis_x", "X channel", "channel",
          "Fluorescence parameter on the analysis scatter x axis."),
@@ -155,6 +182,8 @@ SCHEMA = [
         ("out_png", "Histogram PNG", "text", "Histogram PNG file name."),
         ("out_scatter_pdf", "Gating scatter PDF", "text", "Gating scatter PDF file name."),
         ("out_scatter_png", "Gating scatter PNG", "text", "Gating scatter PNG file name."),
+        ("out_singlets_pdf", "Singlets scatter PDF", "text", "Singlets scatter PDF file name."),
+        ("out_singlets_png", "Singlets scatter PNG", "text", "Singlets scatter PNG file name."),
         ("out_analysis_pdf", "Analysis scatter PDF", "text", "Analysis scatter PDF file name."),
         ("out_analysis_png", "Analysis scatter PNG", "text", "Analysis scatter PNG file name."),
         ("out_xlsx", "XLSX statistics file", "text", "Excel file with per-sample statistics. Sample names are appended automatically."),
@@ -194,6 +223,18 @@ DEFAULTS = {
     "scatter_ylabel": "",
     "scatter_point_size": 2.0,
     "scatter_point_alpha": 0.45,
+    # singlets scatter
+    "singlets_x": "FSC-A",
+    "singlets_y": "FSC-H",
+    "singlets_scale": "log",
+    "singlets_xlim_auto": True,
+    "singlets_xlim_lo": 1e3,
+    "singlets_xlim_hi": 1e6,
+    "singlets_ylim_auto": True,
+    "singlets_ylim_lo": 1e3,
+    "singlets_ylim_hi": 1e6,
+    "singlets_xlabel": "",
+    "singlets_ylabel": "",
     # analysis scatter
     "analysis_x": "ECD-A",
     "analysis_y": "FSC-A",
@@ -234,6 +275,8 @@ DEFAULTS = {
     "out_png": "ECD-A_histogram.png",
     "out_scatter_pdf": "gating_scatter.pdf",
     "out_scatter_png": "gating_scatter.png",
+    "out_singlets_pdf": "singlets_scatter.pdf",
+    "out_singlets_png": "singlets_scatter.png",
     "out_analysis_pdf": "analysis_scatter.pdf",
     "out_analysis_png": "analysis_scatter.png",
     "out_xlsx": "statistics",
@@ -310,14 +353,17 @@ def apply_gate(df, gate):
     return df
 
 
-def channel_values(df, s, scatter_gate=None, hist_gate=None, analysis_gate=None):
+def channel_values(df, s, scatter_gate=None, singlets_gate=None,
+                    hist_gate=None, analysis_gate=None):
     """Gated values of the selected channel (positive-only on log axes).
 
-    Gate chain: scatter_gate -> hist_gate -> analysis_gate.
+    Gate chain: scatter_gate -> singlets_gate -> hist_gate -> analysis_gate.
     """
     gated = df
     if scatter_gate:
         gated = apply_gate(gated, scatter_gate)
+    if singlets_gate:
+        gated = apply_gate(gated, singlets_gate)
     if hist_gate:
         gated = apply_gate(gated, hist_gate)
     if analysis_gate:
@@ -607,10 +653,10 @@ def save_statistics(samples_info, s, out_dir=RESULTS_DIR):
 
     For each sample, produces rows for the histogram and analysis scatter
     (excluding the gating scatter) at each gating stage:
-    ungated -> live cell gated -> histogram gated -> analysis gated
+    ungated -> live cell gated -> singlets gated -> histogram gated -> analysis gated
     (with per-quadrant breakdown for quadrant analysis gates).
 
-    samples_info = [{label, color, df, scatter_gate, hist_gate, analysis_gate}, ...]
+    samples_info = [{label, color, df, scatter_gate, singlets_gate, hist_gate, analysis_gate}, ...]
     """
     try:
         import openpyxl
@@ -634,6 +680,7 @@ def save_statistics(samples_info, s, out_dir=RESULTS_DIR):
     for info in samples_info:
         df = info["df"]
         sg = info.get("scatter_gate")
+        sig = info.get("singlets_gate")
         hg = info.get("hist_gate")
         ag = info.get("analysis_gate")
         label = info["label"]
@@ -644,11 +691,15 @@ def save_statistics(samples_info, s, out_dir=RESULTS_DIR):
         live_cell = apply_gate(df, sg) if sg else df
         stages.append(("live cell gated", live_cell))
 
+        singlets_cell = apply_gate(live_cell, sig) if sig else live_cell
+        if sig:
+            stages.append(("singlets gated", singlets_cell))
+
         if hg:
-            hist_gated_df = apply_gate(live_cell, hg)
+            hist_gated_df = apply_gate(singlets_cell, hg)
             stages.append(("histogram gated", hist_gated_df))
         else:
-            hist_gated_df = live_cell
+            hist_gated_df = singlets_cell
 
         has_quadrant_analysis = ag and ag.get("type") == "quadrant"
         if ag and not has_quadrant_analysis:
@@ -753,17 +804,22 @@ def save_scatter_figure(sample, gate, s, out_dir=RESULTS_DIR):
     return pdf, png
 
 
-def make_analysis_scatter_figure(sample, gate, s, scatter_gate=None):
+def make_analysis_scatter_figure(sample, gate, s, scatter_gate=None, singlets_gate=None):
     """Create a publication-quality analysis scatter figure for one sample.
 
-    The data is pre-filtered by the scatter (gating) gate so the analysis
-    scatter shows only live cells, then the analysis gate is applied on top.
+    The data is pre-filtered by the scatter (gating) gate and the singlets
+    gate so the analysis scatter shows only live single cells, then the
+    analysis gate is applied on top.
     """
     apply_style(s)
     fig, ax = plt.subplots(figsize=(s["fig_w"], s["fig_h"]))
 
     x_ch, y_ch = s["analysis_x"], s["analysis_y"]
-    df = apply_gate(sample["df"], scatter_gate) if scatter_gate else sample["df"]
+    df = sample["df"]
+    if scatter_gate:
+        df = apply_gate(df, scatter_gate)
+    if singlets_gate:
+        df = apply_gate(df, singlets_gate)
     pooled_x = df[x_ch].to_numpy(float)
     pooled_y = df[y_ch].to_numpy(float)
     if s.get("analysis_xlim_auto"):
@@ -790,11 +846,63 @@ def make_analysis_scatter_figure(sample, gate, s, scatter_gate=None):
     return fig
 
 
-def save_analysis_scatter_figure(sample, gate, s, scatter_gate=None, out_dir=RESULTS_DIR):
+def save_analysis_scatter_figure(sample, gate, s, scatter_gate=None,
+                                 singlets_gate=None, out_dir=RESULTS_DIR):
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-    fig = make_analysis_scatter_figure(sample, gate, s, scatter_gate=scatter_gate)
+    fig = make_analysis_scatter_figure(sample, gate, s,
+                                       scatter_gate=scatter_gate,
+                                       singlets_gate=singlets_gate)
     pdf = Path(out_dir) / s["out_analysis_pdf"]
     png = Path(out_dir) / s["out_analysis_png"]
+    fig.savefig(pdf)
+    fig.savefig(png, dpi=s["dpi"])
+    plt.close(fig)
+    return pdf, png
+
+
+def make_singlets_scatter_figure(sample, gate, s, scatter_gate=None):
+    """Create a publication-quality singlets scatter figure for one sample.
+
+    The data is pre-filtered by the scatter (gating) gate so the singlets
+    scatter shows only live cells, then the singlets gate is applied on top.
+    """
+    apply_style(s)
+    fig, ax = plt.subplots(figsize=(s["fig_w"], s["fig_h"]))
+
+    x_ch, y_ch = s["singlets_x"], s["singlets_y"]
+    df = apply_gate(sample["df"], scatter_gate) if scatter_gate else sample["df"]
+    pooled_x = df[x_ch].to_numpy(float)
+    pooled_y = df[y_ch].to_numpy(float)
+    if s.get("singlets_xlim_auto"):
+        ax.set_xlim(*_percentile_limits(pooled_x))
+    else:
+        ax.set_xlim(s["singlets_xlim_lo"], s["singlets_xlim_hi"])
+    if s.get("singlets_ylim_auto"):
+        ax.set_ylim(*_percentile_limits(pooled_y))
+    else:
+        ax.set_ylim(s["singlets_ylim_lo"], s["singlets_ylim_hi"])
+
+    draw_scatter(ax, df, sample["color"], gate, s,
+                 x_ch=x_ch, y_ch=y_ch,
+                 scale_key="singlets_scale",
+                 xlim_auto_key="singlets_xlim_auto",
+                 xlim_lo_key="singlets_xlim_lo",
+                 xlim_hi_key="singlets_xlim_hi",
+                 ylim_auto_key="singlets_ylim_auto",
+                 ylim_lo_key="singlets_ylim_lo",
+                 ylim_hi_key="singlets_ylim_hi",
+                 xlabel_key="singlets_xlabel",
+                 ylabel_key="singlets_ylabel")
+    fig.tight_layout()
+    return fig
+
+
+def save_singlets_scatter_figure(sample, gate, s, scatter_gate=None,
+                                 out_dir=RESULTS_DIR):
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    fig = make_singlets_scatter_figure(sample, gate, s, scatter_gate=scatter_gate)
+    pdf = Path(out_dir) / s["out_singlets_pdf"]
+    png = Path(out_dir) / s["out_singlets_png"]
     fig.savefig(pdf)
     fig.savefig(png, dpi=s["dpi"])
     plt.close(fig)

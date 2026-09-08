@@ -13,6 +13,8 @@ Stop:  Ctrl+C in the terminal
 import base64
 import io
 import json
+import os
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +38,7 @@ PALETTE = ["#4C72B0", "#55A868", "#C44E52", "#8172B2", "#CCB974",
 STATE = {
     "samples": [],   # {path, label, color, active, df}
     "scatter_gates": {},   # {sample_index: gate_dict}  – gating scatter (FSC/SSC)
+    "singlets_gates": {},  # {sample_index: gate_dict}  – singlets scatter (FSC-A/FSC-H)
     "hist_gates": {},      # {sample_index: gate_dict}  – histogram interval
     "analysis_gates": {},  # {sample_index: gate_dict}  – analysis scatter
 }
@@ -70,6 +73,10 @@ def scatter_gate_for(index):
     return STATE["scatter_gates"].get(str(index))
 
 
+def singlets_gate_for(index):
+    return STATE["singlets_gates"].get(str(index))
+
+
 def hist_gate_for(index):
     return STATE["hist_gates"].get(str(index))
 
@@ -78,7 +85,7 @@ def analysis_gate_for(index):
     return STATE["analysis_gates"].get(str(index))
 
 
-_ALL_GATE_DICTS = ("scatter_gates", "hist_gates", "analysis_gates")
+_ALL_GATE_DICTS = ("scatter_gates", "singlets_gates", "hist_gates", "analysis_gates")
 
 
 def series_for(s):
@@ -87,8 +94,8 @@ def series_for(s):
         if not sample.get("active", True):
             continue
         values = fc.channel_values(sample["df"], s,
-                                    scatter_gate_for(i), hist_gate_for(i),
-                                    analysis_gate_for(i))
+                                    scatter_gate_for(i), singlets_gate_for(i),
+                                    hist_gate_for(i), analysis_gate_for(i))
         out.append({"label": sample["label"], "color": sample["color"], "values": values,
                     "hist_gate": hist_gate_for(i)})
     return out
@@ -98,17 +105,22 @@ def gate_stats(s):
     stats = []
     for i, sample in enumerate(STATE["samples"]):
         sg = scatter_gate_for(i)
+        sig = singlets_gate_for(i)
         hg = hist_gate_for(i)
         ag = analysis_gate_for(i)
         total = len(sample["df"])
         scatter_kept = len(fc.apply_gate(sample["df"], sg)) if sg else total
-        plotted = int(fc.channel_values(sample["df"], s, sg, hg, ag).size)
+        singlets_kept = len(fc.apply_gate(fc.apply_gate(sample["df"], sg) if sg else sample["df"], sig)) if sig else scatter_kept
+        plotted = int(fc.channel_values(sample["df"], s, sg, sig, hg, ag).size)
         stats.append({
             "label": sample["label"], "total": total,
             "scatter_kept": scatter_kept,
             "scatter_percent": round(100 * scatter_kept / total, 1) if total else 0,
+            "singlets_kept": singlets_kept,
+            "singlets_percent": round(100 * singlets_kept / scatter_kept, 1) if scatter_kept else 0,
             "plotted": plotted,
             "has_scatter_gate": sg is not None,
+            "has_singlets_gate": sig is not None,
             "has_hist_gate": hg is not None,
             "has_analysis_gate": ag is not None,
             "active": sample.get("active", True),
@@ -162,11 +174,64 @@ def render_scatter(index, s):
         return _png(fig), meta
 
 
-def render_analysis_scatter(index, s):
+def render_singlets_scatter(index, s):
     with _RENDER_LOCK:
         sample = STATE["samples"][index]
         sg = scatter_gate_for(index)
         df = fc.apply_gate(sample["df"], sg) if sg else sample["df"]
+        x_ch, y_ch = s["singlets_x"], s["singlets_y"]
+
+        fc.apply_style(s)
+        preview_dpi = 120
+        width = int(s["fig_w"] * preview_dpi)
+        height = int(s["fig_h"] * preview_dpi)
+        bbox = [0.15, 0.14, 0.80, 0.80]
+        fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
+        ax = fig.add_axes(bbox)
+
+        pooled_x = df[x_ch].to_numpy(float)
+        pooled_y = df[y_ch].to_numpy(float)
+        if s.get("singlets_xlim_auto"):
+            xlim = fc._percentile_limits(pooled_x)
+        else:
+            xlim = (s["singlets_xlim_lo"], s["singlets_xlim_hi"])
+        if s.get("singlets_ylim_auto"):
+            ylim = fc._percentile_limits(pooled_y)
+        else:
+            ylim = (s["singlets_ylim_lo"], s["singlets_ylim_hi"])
+
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+
+        g = singlets_gate_for(index)
+        fc.draw_scatter(ax, df, sample["color"], g, s,
+                        x_ch=x_ch, y_ch=y_ch,
+                        scale_key="singlets_scale",
+                        xlim_auto_key="singlets_xlim_auto",
+                        xlim_lo_key="singlets_xlim_lo",
+                        xlim_hi_key="singlets_xlim_hi",
+                        ylim_auto_key="singlets_ylim_auto",
+                        ylim_lo_key="singlets_ylim_lo",
+                        ylim_hi_key="singlets_ylim_hi",
+                        xlabel_key="singlets_xlabel",
+                        ylabel_key="singlets_ylabel")
+
+        meta = {"width": width, "height": height, "bbox": bbox,
+                "xlim": list(xlim), "ylim": list(ylim),
+                "scale": s.get("singlets_scale", "log")}
+        return _png(fig), meta
+
+
+def render_analysis_scatter(index, s):
+    with _RENDER_LOCK:
+        sample = STATE["samples"][index]
+        sg = scatter_gate_for(index)
+        sig = singlets_gate_for(index)
+        df = sample["df"]
+        if sg:
+            df = fc.apply_gate(df, sg)
+        if sig:
+            df = fc.apply_gate(df, sig)
         x_ch, y_ch = s["analysis_x"], s["analysis_y"]
 
         fc.apply_style(s)
@@ -256,6 +321,7 @@ class Handler(BaseHTTPRequestHandler):
             return {"schema": groups, "defaults": fc.DEFAULTS, "samples": self.sample_list(),
                     "channels": channels(),
                     "scatter_gates": STATE["scatter_gates"],
+                    "singlets_gates": STATE["singlets_gates"],
                     "hist_gates": STATE["hist_gates"],
                     "analysis_gates": STATE["analysis_gates"],
                     "data_dir": str(fc.DATA_DIR)}
@@ -300,6 +366,7 @@ class Handler(BaseHTTPRequestHandler):
                         STATE[gate_dict][str(ki - 1)] = v
             return {"samples": self.sample_list(), "channels": channels(),
                     "scatter_gates": STATE["scatter_gates"],
+                    "singlets_gates": STATE["singlets_gates"],
                     "hist_gates": STATE["hist_gates"],
                     "analysis_gates": STATE["analysis_gates"]}
 
@@ -324,12 +391,14 @@ class Handler(BaseHTTPRequestHandler):
                     else: STATE[gate_dict].pop(str(i), None)
             return {"samples": self.sample_list(),
                     "scatter_gates": STATE["scatter_gates"],
+                    "singlets_gates": STATE["singlets_gates"],
                     "hist_gates": STATE["hist_gates"],
                     "analysis_gates": STATE["analysis_gates"]}
 
         if path == "/api/gate/set":
             gate_type = req.get("gate_type", "scatter")
             gate_dict = {"scatter": "scatter_gates",
+                         "singlets": "singlets_gates",
                          "histogram": "hist_gates",
                          "analysis": "analysis_gates"}.get(gate_type, "scatter_gates")
             if gate_type == "analysis":
@@ -338,12 +407,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 STATE[gate_dict][str(req["index"])] = req["gate"]
             return {"scatter_gates": STATE["scatter_gates"],
+                    "singlets_gates": STATE["singlets_gates"],
                     "hist_gates": STATE["hist_gates"],
                     "analysis_gates": STATE["analysis_gates"]}
 
         if path == "/api/gate/clear":
             gate_type = req.get("gate_type", "scatter")
             gate_dict = {"scatter": "scatter_gates",
+                         "singlets": "singlets_gates",
                          "histogram": "hist_gates",
                          "analysis": "analysis_gates"}.get(gate_type, "scatter_gates")
             if gate_type == "analysis":
@@ -351,12 +422,18 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 STATE[gate_dict].pop(str(req.get("index", -1)), None)
             return {"scatter_gates": STATE["scatter_gates"],
+                    "singlets_gates": STATE["singlets_gates"],
                     "hist_gates": STATE["hist_gates"],
                     "analysis_gates": STATE["analysis_gates"]}
 
         if path == "/api/scatter":
             s = fc.merge_settings(req.get("settings"))
             img, meta = render_scatter(req["index"], s)
+            return {"img": img, "meta": meta, "stats": gate_stats(s)}
+
+        if path == "/api/singlets_scatter":
+            s = fc.merge_settings(req.get("settings"))
+            img, meta = render_singlets_scatter(req["index"], s)
             return {"img": img, "meta": meta, "stats": gate_stats(s)}
 
         if path == "/api/analysis_scatter":
@@ -377,12 +454,17 @@ class Handler(BaseHTTPRequestHandler):
                 active_sample = STATE["samples"][idx]
                 spdf, spng = fc.save_scatter_figure(
                     active_sample, scatter_gate_for(idx), s)
+                spdf2, spng2 = fc.save_singlets_scatter_figure(
+                    active_sample, singlets_gate_for(idx), s,
+                    scatter_gate=scatter_gate_for(idx))
                 apdf, apng = fc.save_analysis_scatter_figure(
                     active_sample, analysis_gate_for(idx), s,
-                    scatter_gate=scatter_gate_for(idx))
+                    scatter_gate=scatter_gate_for(idx),
+                    singlets_gate=singlets_gate_for(idx))
                 samples_info = [
                     {"label": sm["label"], "color": sm["color"], "df": sm["df"],
                      "scatter_gate": scatter_gate_for(i),
+                     "singlets_gate": singlets_gate_for(i),
                      "hist_gate": hist_gate_for(i),
                      "analysis_gate": analysis_gate_for(i)}
                     for i, sm in enumerate(STATE["samples"])
@@ -391,8 +473,10 @@ class Handler(BaseHTTPRequestHandler):
                 xlsx = fc.save_statistics(samples_info, s)
             result = {"pdf": str(pdf), "png": str(png),
                       "scatter_pdf": str(spdf), "scatter_png": str(spng),
+                      "singlets_pdf": str(spdf2), "singlets_png": str(spng2),
                       "analysis_pdf": str(apdf), "analysis_png": str(apng),
                       "scatter_gates": STATE["scatter_gates"],
+                      "singlets_gates": STATE["singlets_gates"],
                       "hist_gates": STATE["hist_gates"],
                       "analysis_gates": STATE["analysis_gates"],
                       "snippet": self.snippet(s)}
@@ -425,6 +509,7 @@ class Handler(BaseHTTPRequestHandler):
 
         return (f"SAMPLES = [\n{samples}\n]\n\n"
                 f"SCATTER_GATES = {_gates_str('scatter_gates')}\n\n"
+                f"SINGLETS_GATES = {_gates_str('singlets_gates')}\n\n"
                 f"HIST_GATES = {_gates_str('hist_gates')}\n\n"
                 f"ANALYSIS_GATES = {_gates_str('analysis_gates')}\n\n"
                 f"SETTINGS = merge_settings({{\n{settings}\n}})")
@@ -432,13 +517,16 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     autoload_defaults()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = int(os.environ.get("PORT", "0"))
+    host = "0.0.0.0" if port else "127.0.0.1"
+    server = ThreadingHTTPServer((host, port), Handler)
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}"
     print(f"Flower ready at {url}")
     print(f"Loaded {len(STATE['samples'])} file(s) from {fc.DATA_DIR}")
     print("Press Ctrl+C to stop.")
-    threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    if not os.environ.get("PORT"):
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
