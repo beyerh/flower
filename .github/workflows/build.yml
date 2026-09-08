@@ -39,6 +39,11 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller flower.spec --noconfirm
 
+      - name: Code-sign .app bundle (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/Flower.app
+
       - name: Zip artifact (macOS)
         if: runner.os == 'macOS'
         run: |
