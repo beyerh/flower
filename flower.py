@@ -58,7 +58,7 @@ def add_sample(path, label=None, color=None):
 
 
 def autoload_defaults():
-    for path in sorted(fc.DATA_DIR.glob("*.fcs")):
+    for path in sorted(fc.BUNDLED_DIR.glob("*.fcs")):
         try:
             add_sample(path)
         except Exception as exc:  # noqa: BLE001

@@ -20,13 +20,14 @@ from matplotlib.ticker import AutoMinorLocator, FuncFormatter, LogLocator, NullF
 from scipy.ndimage import gaussian_filter1d
 
 if getattr(sys, "frozen", False):
-    # Running as a PyInstaller bundle — use the user's home directory
-    # as the starting point for the file browser, and a writable folder
-    # for results (the app bundle directory is read-only on macOS).
+    # Running as a PyInstaller bundle — bundled FCS files are extracted
+    # to sys._MEIPASS; results go to a writable folder in the user's home.
+    BUNDLED_DIR = Path(sys._MEIPASS)
     DATA_DIR = Path.home()
     RESULTS_DIR = Path.home() / "Flower_results"
 else:
-    DATA_DIR = Path(__file__).parent
+    BUNDLED_DIR = Path(__file__).parent
+    DATA_DIR = BUNDLED_DIR
     RESULTS_DIR = DATA_DIR / "results"
 
 _Y_AXIS_MODES = {

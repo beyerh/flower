@@ -11,7 +11,11 @@ a = Analysis(
     ['flower.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        ('03-HeLA WT-C1.fcs', '.'),
+        ('03-HeLa pMLM049 clone 6 Dark-B4.fcs', '.'),
+        ('03-HeLa pMLM049 clone 6 Light-B3.fcs', '.'),
+    ],
     hiddenimports=[
         'matplotlib.backends.backend_agg',
         'readfcs',
